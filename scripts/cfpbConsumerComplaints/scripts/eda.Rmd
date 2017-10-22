@@ -1,0 +1,440 @@
+---
+title: "US Consumer Finance Complaints: Exploratory Data Analysis"
+author: "Michael Rosenberg, mmrosenb@andrew.cmu.edu"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+fontsize: 16pt
+header-includes:
+    - \usepackage{tikz}
+---
+
+
+```{r,message = FALSE}
+#imports
+library(ggplot2) # Data visualization
+library(readr) # CSVfile I/O, e.g. the read_csv function
+library(dplyr) #for data management purposes
+library(knitr)
+library(scales) #for scaling dates
+library(zipcode) #for getting zipcode mapping
+library(grid)
+#NLP-specific imports
+library(NLP)
+library(openNLP)
+library(magrittr)
+library(tm)
+library(qdap)
+#globals
+indentWidth = .8 #for building barplots
+sigLev = 3 #for significant digits
+#plotting constants
+histBarGeom = (geom_bar(colour="black", fill="#DD8888", width=indentWidth,
+                 stat="identity")) #helper to clear up space
+```
+
+```{r}
+#load in dataset
+complaintFrame = read_csv("../input/consumer_complaints.csv")
+print(complaintFrame)
+```
+
+##Univariate EDA
+
+We see that there are `r dim(complaintFrame)[1]` observations in our dataset.
+This is a sizable dataset, especially for language-oriented data. Thus, we may
+need to be careful with our data manipulation.
+
+```{r,summaryTable}
+#have our number and density functions for column operations
+numNA <- function(x) { return(sum(is.na(x)))}
+propNA <- function(x) { return(numNA(x) / length(x))}
+numUnique <- function(x) { return(length(unique(x))) }
+#then develop our exportable table
+numRows = length(colnames(complaintFrame))
+exportableTable = data.frame(numMissingVal = integer(numRows),
+                             propMissingVal = double(numRows))
+exportableTable["numMissingVal"] = apply(complaintFrame,2,numNA)
+exportableTable["propMissingVal"] = apply(complaintFrame,2,
+                                                        propNA)
+exportableTable["numUnique"] = apply(complaintFrame,2,numUnique)
+#then rename before export
+colnames(exportableTable) = c("Number of Missing Values",
+                              "Proportion of Misisng Values",
+                              "Number of Unique Values")
+rownames(exportableTable) = colnames(complaintFrame)
+kable(exportableTable)
+```
+
+_Table 1: Number of unique values for each variable,
+number of missing values for each variable, and missing value proportions 
+relative to the dataset size._
+
+We see that our missing value situation is very extreme across the board.
+While there are many variables that have no missing values, there are several
+variables where large proportions of their observations are not listed. This is
+particular severe for the variables `consumer_complaint_narrative,
+company_public_response,tags,` and `consumer_consent_provided`. This may
+suggests that we will remove these variables during the full analysis of our
+dataset, although we may consider viewing these variables in our EDA in order
+to study meaningful trends for the variables.
+
+In terms of unique levels, We see that certain variables have a relatively small
+set of levels, which suggests that it may be reasonable to explore these 
+particular values 
+univariately through simple barplots. I will choose to build barplots and
+summaries for variables with up to $11$ distinct levels.
+
+
+### When are these complaints occuring?
+
+```{r,makeDateSeries}
+#prepare dataset for date_recieved
+dateFrame = summarise(group_by(complaintFrame,date_received),count = n())
+#reformat dates
+dateFrame$date_received = as.Date(paste(dateFrame$date_received),"%m/%d/%Y")
+#prepare dateSent
+dateSentFrame = summarise(group_by(complaintFrame,date_sent_to_company),
+                          count = n())
+dateSentFrame$date_sent_to_company = as.Date(
+                        paste(dateSentFrame$date_sent_to_company),"%m/%d/%Y")
+#then plot time series
+dt = (ggplot()
+    + geom_line(data = dateFrame,aes(x = date_received,y = count,
+                                     color = "Date Received"),alpha =.5)
+    + geom_line(data = dateSentFrame,aes(x = date_sent_to_company,y=count,
+                                         color = "Date Sent To Company"),
+                alpha = .2))
+dt = dt + scale_x_date()
+dt = dt + xlab("Date") + ylab("Frequency")
+dt + ggtitle("Observations Over Time")
+```
+
+_Figure 1: Our observations of when the complaint was recieved and
+when it was sent to the company over time._
+
+We generally do not see particular yearly cyclical trends occuring the data,
+which suggests that there isn't a seasonal bias in the number of observations we
+get over time. That being said, we generally see a rise in the number of
+observed complaints every two weeks after 2014 starts then before 2014. This may
+suggest that we will likely see a bias of observations towards the presnt than
+the past, and we may simply want to encode a date indicator as before and after
+2014. We also see that the date when the complaint was recieved and the date
+when the complaint was sent to the company are rather correlated. It would
+be useful to visualize the distribution of the time difference between these
+two variables.
+
+```{r,histOfTimeDiff}
+#generate time difference variable
+complaintFrame$alteredDateRecieved = as.Date(complaintFrame$date_received,
+                                             "%m/%d/%Y")
+complaintFrame$alteredDateSent = as.Date(complaintFrame$date_sent_to_company,
+                                         "%m/%d/%Y")
+complaintFrame$dateTimeDiff = (complaintFrame$alteredDateSent -
+                                complaintFrame$alteredDateRecieved)
+#then plot histogram
+(ggplot(data=complaintFrame, aes(complaintFrame$dateTimeDiff)) 
+            + geom_histogram()
+            + xlab("Time Difference")
+            + ggtitle("Distribution of Time Difference"))
+```
+
+_Figure 2: Distribution of the number of days between Date Recieved and
+Date Sent to Company._
+
+We see that this plot is extremely right-skewed, which suggests that we
+should consider a $log$ form for this variable.
+
+```{r,histOfLogTimeDiff}
+#make log variable
+complaintFrame$logDateTimeDiff = log(
+                                as.integer(complaintFrame$dateTimeDiff) + 2)
+(ggplot(data=complaintFrame, aes(complaintFrame$logDateTimeDiff)) 
+            #get density
+            + geom_histogram(aes(y = ..density..)) + geom_density() 
+            + xlab("Log Time Difference")
+            + ggtitle("Distribution of\nLog Time Difference"))
+```
+
+_Figure 3: Distribution of $\log(dateTimeDiff + 2)$, where 
+$dateTimeDiff$ is the number of dayas between Date Recieved and Date Sent to
+Company_
+
+We see that this distribution is largely right-skewed, with many complaints
+taking few or no days to get to the company and some complaints taking an
+extraordinary amount of time to get to the company. While it would be useful
+to figure out what informs these time differences, the mechanisms that inform
+how long a complaint will get to a company are likely not informed by the
+textual data present in this dataset.
+
+### Where are the complaints occuring?
+
+```{r,makeZipCodePlot}
+#load in zipcode mapper
+data(zipcode)
+#then perform left join on zip-code
+zipcode$cleanedZipCode = zipcode$zip #since it is already cleaned
+complaintFrame$cleanedZipCode = clean.zipcodes(complaintFrame$zipcode)
+augmentedComplaintFrame = merge(x = complaintFrame,
+                                y = zipcode,by = "cleanedZipCode",all.x = TRUE)
+#get number of zipcodes that could not be joined properly
+failJoinObs = augmentedComplaintFrame[which(
+                            !is.na(augmentedComplaintFrame$cleanedZipCode)
+                            & is.na(augmentedComplaintFrame$latitude)),]
+numFailJoins = dim(failJoinObs)[1]
+#then plot based on count summary per zip code
+augmentedComplaintFrame = augmentedComplaintFrame[
+                            which(
+                                !is.na(augmentedComplaintFrame$cleanedZipCode)
+                                & !is.na(augmentedComplaintFrame$latitude)),]
+levelTable = summarise(group_by(augmentedComplaintFrame,cleanedZipCode,latitude,
+                              longitude),count = n())
+givenMap = ggplot(levelTable,aes(x = longitude,y = latitude,colour = count))
+givenMap = givenMap + geom_point()
+#labels
+givenMap = (givenMap + xlab("Longitude") + ylab("Latitude") 
+                + ggtitle("Zip Code Frequency"))
+givenMap
+```
+
+_Figure 3: Our Zip Code Frequencies Over Longitude and Latitude._
+
+It is apparent that this plot is not very clear in representation due to the
+outlying territories represented. Hence, we will reorganize our plot to only
+consider Zip Codes within the continental United States (i.e. not Alaska,
+Puerto Rico, Hawaii, Guam, and the American Samoa).
+
+### What does the non-language data look like?
+
+```{r,makeNewZipCodePlot}
+#get rid of observations in outlying territories
+levelTable = summarise(group_by(augmentedComplaintFrame,cleanedZipCode,latitude,
+                              longitude,state.x),count = n())
+nonContinentalStateCodeVec = c("PR","HI","AK","AS","GU","MP","PW","VI","AE",
+                                                        "AP","MH","FH",NA)
+levelTable$nonContinental = levelTable$state.x %in% nonContinentalStateCodeVec
+levelTable = levelTable[which(!levelTable$nonContinental),]
+#several hardcoded removals from inital graph
+levelTable = levelTable[which(levelTable$longitude > -140
+                              & levelTable$latitude > 20),]
+#normalize our counts
+levelTable$normalizedCount = levelTable$count / max(levelTable$count)
+#then replot
+givenMap = ggplot(levelTable,aes(x = longitude,y = latitude,
+                                alpha = normalizedCount))
+givenMap = givenMap + geom_point()
+#labels
+givenMap = (givenMap + xlab("Longitude") + ylab("Latitude") 
+                + ggtitle("Zip Code Normalized Frequency"))
+givenMap
+```
+
+_Figure 4: Our Normalize Frequencies over the longitude and latitude
+coordinates of zip codes in the continental United States._
+
+Most of our observations are occuring in California, the
+northeast corridor, and Florida, which is expected given that these are areas
+with high levels of population. There is a surprising level of density out
+in the midwest and the rockies, although these are likely due to certain
+high-population cities in the middle of rural areas.
+
+```{r,makeProductPlot}
+countFrame = summarise(group_by(complaintFrame,product),count = n())
+countFrame$density = countFrame$count / sum(countFrame$count)
+ggplot(data = countFrame, aes(x=product, y=density)) + 
+        histBarGeom + coord_flip() + guides(fill=FALSE) +
+        xlab("Product") + ylab("Density") +
+        ggtitle(paste("Distribution of","Products"))
+```
+
+_Figure 5: Distribution of Products._
+
+We see that the majority of the products within our complaints surrounds
+mortgages, which should make sense given the sensitivity of houes ownership to
+the individual consumer. We also see complaints related to bank accounts,
+credit cards, credit reporting, and debt collection also have sizable densities.
+Again, this is not surprising given the sensitivity of those issues to the
+quality of life for a consumer.
+
+```{r,companyPublicResponseTable}
+countFrame = summarise(group_by(complaintFrame,company_public_response),
+                       count = n())
+countFrame$density = countFrame$count / sum(countFrame$count)
+kable(countFrame)
+```
+
+_Table 2: Distribution of Company Public Response._
+
+As discussed earlier,
+we see here that there are a sizable number of obesrvations that do not have
+values for a company response. Thus, the usable of this variable in this
+dataset is relatively limited, unless we wanted to remove all "NA" values for
+this variable, which would remove quite a large amount of the dataset. Of the
+remaining evels, we see that a little less that $10\%$ of or observations had
+companies choosing not to respond.
+
+```{r,getCompanyResponseToConsumerPlot}
+countFrame = summarise(group_by(complaintFrame,company_response_to_consumer),
+                       count = n())
+countFrame$density = countFrame$count / sum(countFrame$count)
+ggplot(data = countFrame, aes(x=company_response_to_consumer, y=density)) + 
+        histBarGeom + coord_flip() + guides(fill=FALSE) +
+        xlab("Company Private Response") + ylab("Density") +
+        ggtitle("Distribution of\nCompany Private Response")
+```
+
+_Figure 6: Distribution of Company Private Responses, i.e. the response that
+a company provides to the consumer._
+
+We see that most of the financial complaints introduced by consumers are closed
+without some form of relief, but at least with some form explanation. There are
+also many instances in which a complaint is closed with non-monetary relief:
+I currently am not sure what kind of relief this would be, but I would imagine
+this may be a re-authorization of a card or a re-authorization of an account.
+If we remove the observations that are in progress, it may be interesting to
+study the relationship between the language content of the consumer's complaint
+narrative and the company's private response.
+
+```{r,getTopTenCompaniesPlot}
+countFrame = summarise(group_by(complaintFrame,company),
+                       count = n())
+countFrame$density = countFrame$count / sum(countFrame$count)
+#sort by density, descending
+countFrame = countFrame[order(countFrame$density,decreasing = TRUE),]
+#then plot top 10
+plotFrame = countFrame[1:10,]
+ggplot(data = plotFrame,aes(x=company,y=density)) +
+    histBarGeom + coord_flip() + guides(fill = FALSE) +
+    xlab("Company") + ylab("Density") +
+    ggtitle("Proportions of Top 10 Companies")
+```
+
+_Figure 7: Proportions of Complaints Given to the Top 10 Companies For
+Complaints._
+
+In total, the top 10 companies for complaints comprise
+$`r signif(sum(plotFrame$density) * 100,sigLev)` \%$ of all complaints in our
+dataset. We see that Bank of America and Wells Fargo are often given the most
+complaints, which makes sense given their market shares as national banks in
+the United States. Somewhat more surprising representations are Ocwen and
+Nationstar Mortgage. It is possible that these financial intermediaries provide
+exceptionally poor service for the market shares they have in financial
+services.
+
+```{r,buildOtherHistograms}
+#plot tags
+countFrame = summarise(group_by(complaintFrame,tags),
+                       count = n())
+#remove NAs
+countFrame = countFrame[which(!is.na(countFrame$tags)),]
+countFrame$density = countFrame$count / sum(countFrame$count)
+tagPlot = ggplot(data = countFrame, aes(x=tags, y=density)) + 
+        histBarGeom + coord_flip() + guides(fill=FALSE) +
+        xlab("Tag") + ylab("Density") +
+        ggtitle("Distribution of Tags\n(NAs Removed)")
+#plot consumer_consent_provided
+countFrame = summarise(group_by(complaintFrame,consumer_consent_provided),
+                       count = n())
+#remove NAs
+countFrame = countFrame[which(!is.na(countFrame$consumer_consent_provided)),]
+countFrame$density = countFrame$count / sum(countFrame$count)
+ccpPlot = ggplot(data = countFrame,
+                 aes(x=consumer_consent_provided, y=density)) +
+        histBarGeom + coord_flip() + guides(fill=FALSE) +
+        xlab("Consumer Consent\nProvided") + ylab("Density") +
+        ggtitle("Distribution of Consumer Consent\nProvided (NAs Removed)")
+#submitted_via
+countFrame = summarise(group_by(complaintFrame,submitted_via),
+                       count = n())
+countFrame$density = countFrame$count / sum(countFrame$count)
+svPlot = ggplot(data = countFrame,
+                 aes(x=submitted_via, y=density)) +
+        histBarGeom + coord_flip() + guides(fill=FALSE) +
+        xlab("Submitted Via") + ylab("Density") +
+        ggtitle("Distribution of Submitted Via")
+#timely_response
+countFrame = summarise(group_by(complaintFrame,timely_response),
+                       count = n())
+countFrame$density = countFrame$count / sum(countFrame$count)
+trPlot = ggplot(data = countFrame,
+                 aes(x=timely_response, y=density)) +
+        histBarGeom + coord_flip() + guides(fill=FALSE) +
+        xlab("Was\nTimely Response") + ylab("Density") +
+        ggtitle("Distribution of Timely Response")
+#consumer_disputed?
+countFrame = summarise(group_by(complaintFrame,`consumer_disputed?`),
+                       count = n())
+countFrame$density = countFrame$count / sum(countFrame$count)
+cdPlot = ggplot(data = countFrame,
+                 aes(x=`consumer_disputed?`, y=density)) +
+        histBarGeom + coord_flip() + guides(fill=FALSE) +
+        xlab("Consumer Disputed?") + ylab("Density") +
+        ggtitle("Distribution of\nConsumer Disputes")
+#then plot with a multiplot function, adapted from
+#http://www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2)/
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+multiplot(tagPlot,ccpPlot,svPlot,trPlot,cdPlot,cols=2)
+```
+
+_Figure 8: Distributions of some of our other variables. Note that the NAs
+have been removed from consideration in the distribution of "Tags" and "Consumer
+Consent Provided"._
+
+When viewing Tags from a univariate perspective, we see that these tags identify
+whether a consumer is an older American or a servicemember. This suggests that
+we can simply encode NAs as non-servicemember non-elderly Americans, which
+solves that missing value problem. We see that among observed consumer consent
+indicators, there is somewhat more provided consents than unprovided consents,
+although it is not a severe difference. Most complaints are submitted via the
+web, although it is apparent that referrals are a common method of complaint;
+it would be useful to study what these "referrals" are, and what are the
+mechanisms to which the CFPB gets these referrals. We see most of the responses
+are timely, and it would be useful to validate if the "No" observations of this
+variable are perfectly linear with the "Untimely Response" observations for the
+`company_response_to_cosumer` variable. We see that about $20\%$ of our
+complaint observations are disputed by consumers after they are resolved. It
+may be useful to see the relationship of company private response and the
+consumer-written complaint for this variable, as it would be a strong step
+towards reducing additional complaints if we can predict what kinds of
+complaints and what kinds of responses lead to disputes.
+
+TODO:
+\begin{itemize}
+    \item Fix Labeling on Figure 8.
+    \item Figure out what is meant by "referral" for the `submitted_via`
+        variable.
+    \item Replot histogram of $dateTimeDiff$ to be $\log(dateTimeDiff + 2)$.
+    \item Renumber figures.
+\end{itemize}
